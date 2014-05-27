@@ -158,13 +158,13 @@ for vol in vols:
         snapshots = vol.snapshots()
         deletelist = []
         for snap in snapshots:
-            if (snap.description.startswith('hourly snapshot') and args.period == 'hour'):
+            if (snap.description.startswith('hour') and args.period == 'hour'):
                 deletelist.append(snap)
-            elif (snap.description.startswith('weekly snapshot') and args.period == 'week'):
+            elif (snap.description.startswith('week') and args.period == 'week'):
                 deletelist.append(snap)
-            elif (snap.description.startswith('daily snapshot') and args.period == 'day'):
+            elif (snap.description.startswith('day') or snap.description.startswith('daily') and args.period == 'day'):
                 deletelist.append(snap)
-            elif (snap.description.startswith('monthly snapshot') and args.period == 'month'):
+            elif (snap.description.startswith('month') and args.period == 'month'):
                 deletelist.append(snap)
             else:
                 logger.info('Snapshot not added to deletelist: ' + snap.description)
