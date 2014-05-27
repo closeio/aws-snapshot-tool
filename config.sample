@@ -15,6 +15,7 @@ config = {
     # Number of snapshots to keep (the older ones are going to be deleted,
     # since they cost money).
     'keep_hour': 5,
+    'keep_four_hours': 5,
     'keep_day': 5,
     'keep_week': 5,
     'keep_month': 11,

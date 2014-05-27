@@ -37,12 +37,18 @@ parser = argparse.ArgumentParser(description='''
     tagged properly (see the config file).
     ''')
 parser.add_argument('period', metavar='P', type=str,
-                    choices=('hour', 'day', 'week', 'month'),
+                    choices=('hour', 'four_hours', 'day', 'week', 'month'),
                     help='Period of the snapshots')
 args = parser.parse_args()
 
 # Frequency label, used for logging and the snapshots' descriptions
-frequency = 'daily' if args.period == 'day' else args.period + 'ly'
+frequency = {
+    'hour': 'hourly',
+    'four_hours': 'four-hourly',
+    'day': 'daily',
+    'week': 'weekly',
+    'month': 'monthly'
+}[args.period]
 
 # Messages to return via SNS
 sns_msg = sns_err_msg = ""
@@ -54,9 +60,6 @@ count_total = 0
 count_success = 0
 count_errors = 0
 
-# List with snapshots to delete
-deletelist = []
-
 # Set up logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -66,7 +69,6 @@ fh = logging.FileHandler(config['log_file'])
 fh.setFormatter(formatter)
 sh = logging.StreamHandler()
 sh.setFormatter(formatter)
-
 logger.addHandler(fh)
 logger.addHandler(sh)
 
@@ -98,7 +100,7 @@ else:
     else:
         conn = EC2Connection(region=region)
 
-# Connect to SNS
+# Connect to SNS, if ARN was specified in the config
 if sns_arn:
     logger.info('Connecting to SNS')
     if proxyHost:
@@ -112,6 +114,7 @@ if sns_arn:
         else:
             sns = boto.sns.connect_to_region(ec2_region_name)
 
+# Helper methods to get the tags from a volume and add them to a snapshot
 def get_resource_tags(resource_id):
     resource_tags = {}
     if resource_id:
@@ -125,62 +128,54 @@ def get_resource_tags(resource_id):
 def set_resource_tags(resource, tags):
     for tag_key, tag_value in tags.iteritems():
         if tag_key not in resource.tags or resource.tags[tag_key] != tag_value:
-            logger.info('Tagging %(resource_id)s with [%(tag_key)s: %(tag_value)s]' % {
-                'resource_id': resource.id,
-                'tag_key': tag_key,
-                'tag_value': tag_value
-            })
             resource.add_tag(tag_key, tag_value)
 
 # Get all the volumes that match the tag criteria
 logger.info('Finding volumes that match the requested tag ({ "tag:%(tag_name)s": "%(tag_value)s" })' % config)
-vols = conn.get_all_volumes(filters={ 'tag:' + config['tag_name']: config['tag_value'] })
+try:
+    vols = conn.get_all_volumes(filters={ 'tag:' + config['tag_name']: config['tag_value'] })
+    count_total = len(vols)
+except Exception, e:
+    vols = []
+    msg = u'Volumes could not be listed: ' + unicode(e)
+    logger.error(msg)
+    sns_err_msg += msg
 
 for vol in vols:
     try:
-        count_total += 1
-        logger.info(vol)
         tags_volume = get_resource_tags(vol.id)
         description = '%(frequency)s snapshot for %(vol_id)s taken by the snapshot script at %(timestamp)s' % {
             'frequency': frequency,
             'vol_id': vol.id,
             'timestamp': datetime.datetime.utcnow().strftime('%d-%m-%Y %H:%M:%S')
         }
-        try:
-            current_snap = vol.create_snapshot(description)
-            set_resource_tags(current_snap, tags_volume)
-            logger.info('Snapshot created with description: %s and tags: %s' % (description, tags_volume))
-            total_created += 1
-        except Exception, e:
-            logger.error(e)
+        current_snap = vol.create_snapshot(description)
+        set_resource_tags(current_snap, tags_volume)
+        logger.info('Snapshot created with description: "%s" and tags: %s' % (description, tags_volume))
+        total_created += 1
 
         # Create a list of all snapshots for a specified period
         snapshots = vol.snapshots()
-        deletelist = []
-        for snap in snapshots:
-            if (snap.description.startswith('hour') and args.period == 'hour'):
-                deletelist.append(snap)
-            elif (snap.description.startswith('week') and args.period == 'week'):
-                deletelist.append(snap)
-            elif (snap.description.startswith('day') or snap.description.startswith('daily') and args.period == 'day'):
-                deletelist.append(snap)
-            elif (snap.description.startswith('month') and args.period == 'month'):
-                deletelist.append(snap)
-            else:
-                logger.info('Snapshot not added to deletelist: ' + snap.description)
+
+        # Filter the relevant snapshots (description matching the frequency)
+        relevant_snaps = [snap for snap in snapshots if (
+                snap.description.startswith(frequency) and
+                'taken by the snapshot script' in snap.description
+            )
+        ]
 
         # Sort the list by the snapshot date, from the oldest to the newest
-        deletelist.sort(key=lambda snap: snap.start_time)
+        relevant_snaps.sort(key=lambda snap: snap.start_time)
 
-        keep = config.get('keep_' + args.period)
+        keep_count = config.get('keep_' + args.period)
 
-        if keep is None:
+        if keep_count is None:
             logger.info('No retention policy found in the config for %s, skipping' % 'keep_' + args.period)
             continue
 
         # Cut the list to only include the outdated snapshots
-        delta = len(deletelist) - keep
-        deletelist = deletelist[:delta] if delta > 0 else []
+        delta = len(relevant_snaps) - keep_count
+        deletelist = relevant_snaps[:delta] if delta > 0 else []
 
         # Delete the snapshots
         for snap in deletelist:
@@ -191,9 +186,10 @@ for vol in vols:
         # Sleep after processing each volume
         time.sleep(3)
     except Exception, e:
-        logger.error('Error in processing volume with id: ' + vol.id)
+        msg = 'Error in processing volume with id: ' + vol.id
+        logger.error(msg)
         logger.error(e)
-        sns_err_msg += 'Error in processing volume with id: %s\n' % vol.id
+        sns_err_msg += msg + '\n'
         count_errors += 1
     else:
         count_success += 1
