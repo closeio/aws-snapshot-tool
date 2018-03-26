@@ -23,6 +23,7 @@
 import argparse
 import datetime
 import logging
+import sys
 import time
 
 from boto.ec2.connection import EC2Connection
@@ -205,6 +206,12 @@ result += "Total snapshots errors: %d\n" % count_errors
 
 sns_msg += result
 
+# Not finding any volumes is considered an error
+if not vols:
+    msg = u'No volumes found'
+    logger.error(msg)
+    sns_err_msg += msg
+
 # SNS reporting
 if sns_arn:
     if sns_err_msg:
@@ -214,3 +221,5 @@ if sns_arn:
 
 logger.info(result)
 
+if sns_err_msg:
+    sys.exit(1)
